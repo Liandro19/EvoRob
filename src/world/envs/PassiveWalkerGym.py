@@ -129,8 +129,79 @@ class PassiveWalkerEnv(MujocoEnv, utils.EzPickle):
         if pert_force is not None:
             self.body_ids , self.force = pert_force
 
-    
     def step(self, action):
+        xy_position_before = self.data.body(self._main_body).xpos[:2].copy()
+        
+        if self.body_ids is not None:
+            self.apply_force()
+        
+        self.do_simulation(action, self.frame_skip)
+        xy_position_after = self.data.body(self._main_body).xpos[:2].copy()
+
+        xy_velocity = (xy_position_after - xy_position_before) / self.dt
+        x_velocity, y_velocity = xy_velocity
+
+        x_position = self.data.qpos[0]
+        z_position = self.data.qpos[2]
+
+        # --- Reward shaping ---
+        distance_reward_weight = 3.0
+        forward_velocity_weight = 1.0
+
+        forward_reward = (
+            x_position * distance_reward_weight +
+            x_velocity * forward_velocity_weight
+        )
+        
+        reward = forward_reward  # initial reward
+
+        # --- Observation & Info ---
+        observation = self._get_obs()
+        info = {
+            "reward_forward": forward_reward,
+            "x_position": x_position,
+            "y_position": self.data.qpos[1],
+            "distance_from_origin": np.linalg.norm(self.data.qpos[0:2], ord=2),
+            "x_velocity": x_velocity,
+            "y_velocity": y_velocity,
+        }
+
+        # --- Termination checks ---
+        terminated = False
+        qacc = self.data.qacc
+
+        if np.any(np.isnan(qacc)) or np.any(np.isinf(qacc)) or np.any(np.abs(qacc) > 1e6):
+            DOF = np.argwhere((np.isnan(qacc)) + (np.isinf(qacc)) + (np.abs(qacc) > 1e6)).squeeze()
+            print(ValueError(f'MuJoCo Warning: NaN, Inf, or huge value in QACC at DOF {DOF}'))
+            terminated = True
+
+        elif z_position < self.init_z_offset + 0.25 - x_position * np.tan(5 * np.pi / 180):
+            #fall_penalty = -10.0 + 2.0 * x_position  # adoucit la pénalité si le robot tombe loin
+            #reward = forward_reward + fall_penalty
+            if x_position < 0:
+                reward = -100*x_position
+            else:
+                reward = forward_reward
+            print(f"Walker Fell off the platform at {x_position:.2f} meter!! reward = {reward:.2f}")
+            terminated = True
+
+        elif np.abs(x_position - self.previous_state[0]) < 1e-4:
+            self.stuck += 1
+            if self.stuck > 10 / self.dt:
+                print(f"Walker not moving for 10 seconds!!")
+                reward = -10.0  # pénalité sévère pour blocage
+                terminated = True
+        else:
+            self.stuck = 0
+
+        self.previous_state = observation
+
+        if self.render_mode == "human":
+            self.render()
+
+        return observation, reward, terminated, False, info
+    
+    def step2(self, action):
         xy_position_before = self.data.body(self._main_body).xpos[:2].copy()
         
         if self.body_ids is not None:
@@ -199,7 +270,7 @@ class PassiveWalkerEnv(MujocoEnv, utils.EzPickle):
         return observation, reward, terminated, False, info
 
 
-    def step2(self, action):
+    def step3(self, action):
         xy_position_before = self.data.body(self._main_body).xpos[:2].copy()
         if self.body_ids is not None:
             self.apply_force()
